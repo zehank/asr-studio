@@ -35,15 +35,16 @@ cd studio && ./start      # 自动打开 http://127.0.0.1:8770
 笔记本只负责投放，转写/翻译/总结在另一台机器（比如家里的 Windows + 独显）上做：
 
 ```
-Mac 拖文件 ──► OneDrive（文件）──► Windows 接收端 ──► 本地模型处理
-      └──────► Tailscale 直连信号（秒级触发）
-                                          └──► 结果写回 OneDrive
+Mac 拖文件 ──► OneDrive（文件）────────► Windows：receiver.py --once ──► 本地模型处理
+      └──────► SSH over Tailscale（触发）                              └──► 结果写回 OneDrive
 ```
+
+没有常驻服务、没有监听端口：SSH 叫一次，接收端扫一遍 inbox、做完退出。
 
 - `studio/winlink/submit.py`：Mac 端投放（写 `job.json` + 发信号）
 - `studio/winlink/receiver.py`：接收端（Mac/Windows 通用，Python 标准库）
 - `studio/winlink/PROTOCOL.md`：两端契约（目录、字段、同步门槛）
-- `studio/winlink/setup-win.ps1`：Windows 一键安装（whisper + 模型 + ffmpeg + 自启）
+- `studio/winlink/setup-win.ps1`：Windows 一键安装（whisper + 模型 + ffmpeg + sshd）
 
 ## 目录
 

@@ -4,13 +4,15 @@
 用法:
   submit.py --ops transcribe,translate,summary 文件1 文件2 ...
 """
-import argparse, json, os, shutil, sys, time, urllib.request
+import argparse, json, os, shutil, subprocess, sys, time
 
 DEFAULT_ROOT = os.path.expanduser("~/Library/CloudStorage/OneDrive-UniversityofWaterloo/ASR")
 OPS = ("transcribe", "translate", "summary")
-# 信号通道：Tailscale 直连 Windows（文件仍走 OneDrive）
-SIGNAL_URL = os.environ.get("ASR_SIGNAL_URL", "http://100.77.101.77:8765/job")
-SIGNAL_TOKEN = os.environ.get("ASR_SIGNAL_TOKEN", "asr-9c41f7b2")
+# 触发通道：文件走 OneDrive，信号走 SSH（Tailscale 内网地址）
+SSH_HOST = os.environ.get("ASR_WIN_HOST", "rzhank@100.77.101.77")
+SSH_TARGET = os.environ.get(
+    "ASR_WIN_CMD",
+    r'cmd /c start "asr" /min C:\ASR\python\python.exe C:\ASR\receiver.py --config C:\ASR\config.json --once')
 
 
 def main():
@@ -38,6 +40,11 @@ def main():
     base = os.path.splitext(os.path.basename(files[0]))[0][:40]
     job_id = f"{stamp}-{base}"
     jobdir = os.path.join(inbox, job_id)
+    n = 2
+    while os.path.exists(jobdir):          # 同一秒投同一个文件时避免撞名
+        job_id = f"{stamp}-{n}-{base}"
+        jobdir = os.path.join(inbox, job_id)
+        n += 1
     os.makedirs(jobdir, exist_ok=True)
 
     info = []
@@ -53,22 +60,26 @@ def main():
     with open(os.path.join(jobdir, "job.json"), "w", encoding="utf-8") as fp:
         json.dump(job, fp, ensure_ascii=False, indent=2)
 
-    # 立刻给 Windows 发一个信号；失败也不要紧，那边还有兜底轮询
-    signal_ok = ping_signal(job_id)
+    # 立刻叫 Windows 干活（SSH）；失败也不影响，任务已排进 inbox，手动跑一次就行
+    ok, detail = trigger_remote()
     print(jobdir)
-    print("signal:", "sent" if signal_ok else "skipped/unreachable")
+    print("trigger:", "ok" if ok else "failed — " + detail)
     return 0
 
 
-def ping_signal(job_id):
+def trigger_remote():
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+           "-o", "StrictHostKeyChecking=accept-new", SSH_HOST, SSH_TARGET]
     try:
-        body = json.dumps({"id": job_id, "token": SIGNAL_TOKEN}).encode()
-        req = urllib.request.Request(SIGNAL_URL, data=body,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=4) as r:
-            return r.status == 200
-    except Exception:
-        return False
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        return False, "ssh 超时（Windows 关机或不在 Tailscale 上？）"
+    except FileNotFoundError:
+        return False, "本机没有 ssh 命令"
+    if r.returncode == 0:
+        return True, ""
+    msg = (r.stderr or r.stdout or "").strip().splitlines()
+    return False, (msg[0][:160] if msg else "ssh 返回 %d" % r.returncode)
 
 
 if __name__ == "__main__":

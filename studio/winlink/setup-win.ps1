@@ -16,7 +16,7 @@ param(
   [string]$OllamaUrl = "http://127.0.0.1:11434",
   [string]$TaskName = "ASRReceiver",
   [int]$Threads = 8,
-  [int]$SignalPort = 8765,
+  [switch]$EnableSsh,
   [switch]$Cpu,
   [string]$WhisperBin = "",    # 已经装好 whisper-cli.exe 的话，直接给路径就跳过下载
   [string]$ModelPath = "",     # 已经有 ggml 模型的话，直接给路径
@@ -179,7 +179,6 @@ $cfg = [ordered]@{
   ffmpeg     = $ffExe
   threads    = $Threads
   summary    = [ordered]@{ provider = $Summary; url = $OllamaUrl }
-  signal     = [ordered]@{ port = $SignalPort; token = "asr-9c41f7b2" }
 }
 switch ($Summary) {
   "ollama"   { $cfg.summary.model = $(if ($SummaryModel) { $SummaryModel } else { "qwen3:14b" }) }
@@ -212,43 +211,35 @@ if ($WithOllama) {
   }
 }
 
-# ---------- 7. 开机自启 ----------
-if (-not $DryRun) {
-  $pw = Join-Path $pyDir "pythonw.exe"
-  if (-not (Test-Path $pw)) { $pw = $pyExe }
-  $arg = "`"$dstRecv`" --config `"$cfgPath`" --listen $SignalPort"
-  $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  if ($existing) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false }
-  try {
-    $action = New-ScheduledTaskAction -Execute $pw -Argument $arg -WorkingDirectory $DataDir
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
-    Say "已注册计划任务 $TaskName（登录自启）"
-  } catch {
-    # 没有管理员权限就退回「启动文件夹」快捷方式
-    $startup = [Environment]::GetFolderPath("Startup")
-    $lnk = Join-Path $startup "ASRReceiver.lnk"
-    $ws = New-Object -ComObject WScript.Shell
-    $sc = $ws.CreateShortcut($lnk)
-    $sc.TargetPath = $pw
-    $sc.Arguments = $arg
-    $sc.WorkingDirectory = $DataDir
-    $sc.WindowStyle = 7
-    $sc.Save()
-    Say "没有管理员权限，已改为启动文件夹快捷方式：$lnk"
-  }
-  # 防火墙：只放行 Tailscale 网段（100.64.0.0/10）
-  try {
-    if (-not (Get-NetFirewallRule -DisplayName "ASR signal $SignalPort" -ErrorAction SilentlyContinue)) {
-      New-NetFirewallRule -DisplayName "ASR signal $SignalPort" -Direction Inbound -Protocol TCP `
-        -LocalPort $SignalPort -RemoteAddress 100.64.0.0/10 -Action Allow -Profile Any | Out-Null
-      Say "已加防火墙规则（只允许 Tailscale 网段访问 $SignalPort）"
+# ---------- 7. SSH（Mac 靠它触发，不再需要自启的接收端） ----------
+$PubKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDeV6+tthAqKMG9KDKScFCOwEw8AMdiGD38beYum8xq zehan@mac'
+if ($EnableSsh) {
+  if ($DryRun) {
+    Say "会安装并启用 OpenSSH Server，并把 Mac 的公钥加进 administrators_authorized_keys"
+  } else {
+    $cap = Get-WindowsCapability -Online -Name OpenSSH.Server* | Select-Object -First 1
+    if (-not $cap -or $cap.State -ne "Installed") {
+      Say "安装 OpenSSH Server …"
+      Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
     }
-  } catch { Say "⚠ 防火墙规则没加成（多半没管理员权限），Mac 到 Windows 的信号可能被拦" }
-
-  Start-Process -FilePath $pw -ArgumentList $arg -WorkingDirectory $DataDir -WindowStyle Hidden
-  Say "已在后台启动接收端"
+    Set-Service sshd -StartupType Automatic
+    Start-Service sshd
+    $f = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
+    if (-not (Test-Path $f)) { New-Item -ItemType File -Path $f | Out-Null }
+    if (-not (Select-String -Path $f -SimpleMatch "zehan@mac" -Quiet -ErrorAction SilentlyContinue)) {
+      Add-Content $f $PubKey
+    }
+    icacls $f /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+    Say "sshd 已启动并设为自动；Mac 的公钥已加入"
+    Say "自检：ssh -T $env:USERNAME@$(hostname) 从 Mac 试一下"
+  }
+} else {
+  Say "没加 -EnableSsh，所以没动 SSH。Mac 要触发转写必须能 ssh 进来。"
 }
+
+# 小结：接收端不再常驻，由 Mac 用 SSH 触发
+Say "接收端不是常驻服务；Mac 投放后执行："
+Say "  python.exe $dstRecv --config $cfgPath --once"
 
 # ---------- 8. 自查 ----------
 Say ""
@@ -260,5 +251,7 @@ Say "ffmpeg           : $ffExe"
 Say "接收端           : $dstRecv"
 Say "配置             : $cfgPath"
 Say "总结             : $Summary"
+$sshd = Get-Service sshd -ErrorAction SilentlyContinue
+Say "sshd             : $(if ($sshd) { $sshd.Status } else { '未安装（加 -EnableSsh 可装）' })"
 Say ""
 Say "把音频拖到 Mac 的「发到 Windows」上，几十秒后 $AsrRoot\out 里就会出现结果。"

@@ -7,10 +7,19 @@ Mac 端已经实现并固定，Windows 端只要照这个契约实现就能直�
 
 | | 用什么 | 说明 |
 |---|---|---|
-| 文件 | Waterloo OneDrive | 根目录 `OneDrive - University of Waterloo\ASR`；大文件靠它同步 |
-| 信号 | Tailscale 直连 TCP 8765 | `POST http://100.77.101.77:8765/job`，body `{"id": "<任务id>", "token": "<token>"}` |
+| 文件 | Waterloo OneDrive | 根目录 `OneDrive - University of Waterloo\ASR`；大文件靠它同步、断点续传 |
+| 触发 | SSH over Tailscale | 投放端执行一条命令，让对端跑一次 `receiver.py --once` |
 
-信号只是「去扫一下」，失败不影响：接收端还应每 60 秒兜底扫一次。
+触发命令（投放端发起，`rzhank@100.77.101.77` 是接收端）：
+
+```
+ssh -o BatchMode=yes -o ConnectTimeout=5 rzhank@100.77.101.77 \
+  cmd /c start "asr" /min C:\ASR\python\python.exe C:\ASR\receiver.py --config C:\ASR\config.json --once
+```
+
+`start /min` 让接收端脱离 SSH 会话继续跑，所以投放端合盖/断线不影响它做完。
+
+接收端**不需要常驻**，也不监听任何端口：被叫一次、扫一遍 inbox、做完退出。
 
 ## 2. 目录
 

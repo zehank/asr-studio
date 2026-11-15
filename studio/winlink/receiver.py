@@ -7,9 +7,8 @@ Mac 和 Windows 跑同一份代码，差别只在 config.json 里的路径。
     python3 receiver.py --config config.json        # 一直跑
     python3 receiver.py --config config.json --once  # 只扫一遍就退出
 """
-import argparse, json, os, re, shutil, subprocess, sys, tempfile, threading, time, urllib.parse
+import argparse, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.parse
 import urllib.error, urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CJK = r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]"
 BOILER = [r"点赞", r"订阅", r"转发", r"打赏", r"明镜", r"点点栏目", r"字幕由",
@@ -270,68 +269,15 @@ def scan(cfg, log):
     return left
 
 
-def serve_signal(cfg_get, wake, port, token, log):
-    """一个小 HTTP 服务：Mac 投完任务就 ding 一下，立刻扫描，不靠轮询时延。"""
-
-    class H(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, *a):
-            pass
-
-        def _reply(self, code, body):
-            b = json.dumps(body, ensure_ascii=False).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(b)))
-            self.end_headers()
-            self.wfile.write(b)
-
-        def do_GET(self):
-            self._reply(200, {"ok": True, "service": "asr-signal"})
-
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0) or 0)
-            raw = self.rfile.read(n) if n else b"{}"
-            try:
-                body = json.loads(raw.decode("utf-8") or "{}")
-            except Exception:
-                return self._reply(400, {"ok": False, "error": "bad json"})
-            if token and body.get("token") != token:
-                return self._reply(403, {"ok": False, "error": "bad token"})
-            log("收到信号：" + str(body.get("id", "")))
-            wake.set()
-            self._reply(200, {"ok": True})
-
-    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
-    log(f"信号服务监听 0.0.0.0:{port}")
-    srv.serve_forever()
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.json")
     ap.add_argument("--once", action="store_true")
-    ap.add_argument("--interval", type=int, default=60)   # 没人发信号时的兜底轮询
-    ap.add_argument("--listen", type=int, default=0, help="信号服务端口，0 表示不开")
+    ap.add_argument("--interval", type=int, default=60)   # 常驻模式下的兜底轮询间隔
     a = ap.parse_args()
 
     def log(msg):
         print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
-
-    wake = threading.Event()
-
-    # 信号服务：端口从 --listen 或配置里取
-    port, token = a.listen, ""
-    try:
-        c0 = json.load(open(a.config, encoding="utf-8-sig"))
-        sig = c0.get("signal") or {}
-        port = port or int(sig.get("port") or 0)
-        token = sig.get("token") or ""
-    except Exception:
-        pass
-    if port:
-        threading.Thread(target=serve_signal, args=(None, wake, port, token, log), daemon=True).start()
 
     while True:
         try:
@@ -346,8 +292,7 @@ def main():
         if a.once:
             return 0
         wait = 4 if left else a.interval
-        wake.wait(timeout=wait)
-        wake.clear()
+        time.sleep(wait)
 
 
 if __name__ == "__main__":
