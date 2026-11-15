@@ -1,0 +1,123 @@
+#!/bin/bash
+# trans —— 本地音频/视频 → 文字（中文 + 英文），whisper.cpp + Metal，全程离线
+# 用法: ./trans 录音.m4a [-l zh|en|auto] [-m turbo|small|base] [-o 输出目录]
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN=""
+for c in "$ROOT/src/build/bin/whisper-cli" "$ROOT/src/build/bin/main"; do
+  [ -x "$c" ] && BIN="$c" && break
+done
+MODEL_DIR="$ROOT/models"
+LANG_OPT="auto"
+MODEL="turbo"
+OUTDIR=""
+QUIET=0
+TERMS=""
+
+die() { echo "错误: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+用法: ./trans <音频或视频文件> [更多文件...] [选项]
+
+选项:
+  -l, --lang   zh | en | auto    识别语言，默认 auto（中英混说就用它）
+  -m, --model  turbo | small | medium | base     默认 turbo（最准，速度也够）
+  -o, --out    输出目录（默认跟输入文件放同一个文件夹）
+  -q, --quiet  屏幕上不打印正文，只写文件
+  --terms      "葡萄糖,丙酮酸,线粒体"   提示专业词，识别更准
+  -t, --threads N   线程数（默认用满 CPU）
+
+输出: 每个输入生成 <文件名>.txt（纯文本）和 <文件名>.srt（字幕）
+EOF
+}
+
+[ $# -eq 0 ] && { usage; exit 0; }
+
+FILES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -l|--lang)    LANG_OPT="${2:-}"; shift 2 ;;
+    -m|--model)   MODEL="${2:-}"; shift 2 ;;
+    -o|--out)     OUTDIR="${2:-}"; shift 2 ;;
+    -t|--threads) THREADS="${2:-}"; shift 2 ;;
+    --terms)      TERMS="${2:-}"; shift 2 ;;
+    -q|--quiet)   QUIET=1; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    -*)           die "不认识的选项 $1（./trans 看用法）" ;;
+    *)            FILES+=("$1"); shift ;;
+  esac
+done
+
+[ -n "$BIN" ] || die "whisper.cpp 还没编译: $ROOT/src/build/bin 里没有 whisper-cli"
+[ ${#FILES[@]} -gt 0 ] || die "没给音频文件"
+
+case "$MODEL" in
+  turbo|large-v3-turbo) MODEL_FILE="$MODEL_DIR/ggml-large-v3-turbo.bin" ;;
+  *)                    MODEL_FILE="$MODEL_DIR/ggml-$MODEL.bin" ;;
+esac
+if [ ! -f "$MODEL_FILE" ]; then
+  die "缺模型 $MODEL_FILE，一行下载:
+  curl -L -o \"$MODEL_FILE\" https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$(basename "$MODEL_FILE")"
+fi
+
+THREADS="${THREADS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/trans.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+
+# 任意格式 → whisper 能吃的音频（视频先抽音轨）
+to_wav() {
+  local in="$1" out="$2" m4a="$TMP/audio.m4a"
+  case "${in##*.}" in
+    wav|WAV|mp3|MP3|flac|FLAC|ogg|OGG) ln -f "$in" "$out" 2>/dev/null || cp "$in" "$out"; return 0 ;;
+  esac
+  afconvert -f WAVE -d LEI16@16000 -c 1 "$in" "$out" >/dev/null 2>&1 && return 0
+  avconvert --preset PresetAppleM4A --source "$in" --output "$m4a" >/dev/null 2>&1 \
+    && afconvert -f WAVE -d LEI16@16000 -c 1 "$m4a" "$out" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# 后处理：汉字间去空格；中文后面的半角标点换成全角
+tidy() {
+  /usr/bin/python3 - "$1" <<'PY'
+import re, sys
+p = sys.argv[1]
+t = open(p, encoding="utf-8").read()
+cjk = r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]"
+t = re.sub(rf"(?<={cjk})[ \t]+(?={cjk})", "", t)
+for a, b in [(",", "，"), (".", "。"), ("?", "？"), ("!", "！"), (":", "："), (";", "；")]:
+    t = re.sub(rf"(?<={cjk}){re.escape(a)}", b, t)
+t = re.sub(r"[ \t]+$", "", t, flags=re.M)
+t = re.sub(r"\n{3,}", "\n\n", t)
+open(p, "w", encoding="utf-8").write(t)
+PY
+}
+
+PROMPT=""
+[ -n "$TERMS" ] && PROMPT="以下是普通话与英文混合的录音，使用简体中文转写。涉及术语：$TERMS"
+
+STATUS=0
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] || { echo "跳过（文件不存在）: $f" >&2; STATUS=1; continue; }
+  abs="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+  base="$(basename "$f")"; base="${base%.*}"
+  outdir="${OUTDIR:-$(dirname "$abs")}"
+  mkdir -p "$outdir" || die "建不了输出目录 $outdir"
+
+  wav="$TMP/$base.wav"
+  echo "▶ $base" >&2
+  to_wav "$abs" "$wav" || die "这条音轨读不出来: $f"
+
+  args=(-m "$MODEL_FILE" -f "$wav" -l "$LANG_OPT" -t "$THREADS"
+        --output-txt --output-srt --output-file "$outdir/$base")
+  [ -n "$PROMPT" ] && args+=(--prompt "$PROMPT")
+  [ "$QUIET" = 1 ] && args+=(-np)
+
+  "$BIN" "${args[@]}" 2>/dev/null || die "识别失败: $f"
+  [ -f "$outdir/$base.txt" ] && tidy "$outdir/$base.txt"
+  [ -f "$outdir/$base.srt" ] && tidy "$outdir/$base.srt"
+  echo "✔ $outdir/$base.txt  $outdir/$base.srt" >&2
+done
+
+exit $STATUS

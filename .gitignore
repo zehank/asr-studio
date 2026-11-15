@@ -1,0 +1,22 @@
+# 模型与二进制
+*.bin
+*.gguf
+models/
+whisper.cpp/
+src/build/
+
+# 生成物
+output/
+*.app/
+*.srt
+*.txt
+!requirements.txt
+
+# 配置与密钥（自己的 key 别提交）
+config.json
+config-mac.json
+config-win.json
+*.key
+
+# 系统
+.DS_Store

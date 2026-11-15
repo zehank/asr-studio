@@ -1,0 +1,12 @@
+{
+  "root": "/Users/zehanruan/Library/CloudStorage/OneDrive-UniversityofWaterloo/ASR",
+  "whisper_bin": "/Users/zehanruan/Documents/deepseek-harness/default-workspace/audio2text/src/build/bin/whisper-cli",
+  "model": "/Users/zehanruan/Documents/deepseek-harness/default-workspace/audio2text/models/ggml-large-v3-turbo.bin",
+  "ffmpeg": null,
+  "threads": 8,
+  "summary": {
+    "provider": "gemini",
+    "key": "在这里填你自己的 API key",
+    "model": "gemini-3-flash-preview"
+  }
+}
