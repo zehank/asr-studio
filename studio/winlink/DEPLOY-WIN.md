@@ -20,7 +20,8 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\OneDrive - University
 4. 下载 `ggml-large-v3-turbo.bin`（1.5 GB）
 5. 下载 ffmpeg → `C:\ASR\ffmpeg\bin\ffmpeg.exe`
 6. 写 `C:\ASR\config.json`
-7. `-EnableSsh` 时：装 OpenSSH Server、设为自动启动、把 Mac 的公钥写进 `administrators_authorized_keys`
+7. 注册交互式计划任务 `ASRWorker`（无触发器，Mac 用 ssh 叫它时启动）
+8. `-EnableSsh` 时：装 OpenSSH Server、设为自动启动、把 Mac 的公钥写进 `administrators_authorized_keys`
 
 约 2.5 GB 下载。总结模型 `-Summary` 可选 `ollama` / `gemini` / `deepseek` / `none`。
 
@@ -42,6 +43,8 @@ Windows 本机手动跑一次：
 ```powershell
 C:\ASR\python\python.exe C:\ASR\receiver.py --config C:\ASR\config.json --once
 ```
+
+为什么用计划任务而不是直接 ssh 跑：OneDrive 的云占位文件只有用户会话能读取，SSH 落在 session 0 会被拒绝（`已拒绝访问云文件`）。
 
 Mac 上验证通道：
 

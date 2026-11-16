@@ -10,6 +10,13 @@ Mac 和 Windows 跑同一份代码，差别只在 config.json 里的路径。
 import argparse, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.parse
 import urllib.error, urllib.request
 
+# Windows 控制台默认 cp1252，遇到中文文件名 print 会直接崩；先统一成 UTF-8
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 CJK = r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]"
 BOILER = [r"点赞", r"订阅", r"转发", r"打赏", r"明镜", r"点点栏目", r"字幕由",
           r"谢谢观看", r"感谢观看", r"请关注", r"小铃铛", r"subtitles? by", r"amara\.org"]
@@ -58,24 +65,34 @@ def to_wav(src, dst, cfg):
 
 # ---------- 转写 ----------
 def transcribe(wav, outbase, lang, cfg, log):
-    cmd = [cfg["whisper_bin"], "-m", cfg["model"], "-f", wav, "-l", lang or "auto",
-           "--output-txt", "--output-srt", "--output-file", outbase]
-    if cfg.get("threads"):
-        cmd += ["-t", str(cfg["threads"])]
-    log("  whisper 开始…")
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
-    if r.returncode != 0:
-        raise RuntimeError("whisper 失败：" + (r.stderr or "")[-300:])
-    txt = outbase + ".txt"
-    text = ""
-    if os.path.exists(txt):
-        text = strip_boilerplate(tidy(open(txt, encoding="utf-8").read()))
-        open(txt, "w", encoding="utf-8").write(text)
-    srt = outbase + ".srt"
-    if os.path.exists(srt):
-        srt_text = tidy(open(srt, encoding="utf-8").read())
-        open(srt, "w", encoding="utf-8").write(srt_text)
-    return text
+    """Windows 上 whisper-cli 用窄字符 argv，中文路径会变成 ????；
+    所以一律在纯 ASCII 的临时目录里跑，再把结果搬到目标目录。"""
+    tmp = tempfile.mkdtemp(prefix="asr.")
+    try:
+        ascii_wav = os.path.join(tmp, "in.wav")
+        shutil.copyfile(wav, ascii_wav)
+        ascii_out = os.path.join(tmp, "out")
+        cmd = [cfg["whisper_bin"], "-m", cfg["model"], "-f", ascii_wav, "-l", lang or "auto",
+               "--output-txt", "--output-srt", "--output-file", ascii_out]
+        if cfg.get("threads"):
+            cmd += ["-t", str(cfg["threads"])]
+        log("  whisper 开始…")
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+        if r.returncode != 0:
+            raise RuntimeError("whisper 失败：" + (r.stderr or "")[:400])
+
+        text = ""
+        src_txt = ascii_out + ".txt"
+        if os.path.exists(src_txt):
+            text = strip_boilerplate(tidy(open(src_txt, encoding="utf-8").read()))
+            open(outbase + ".txt", "w", encoding="utf-8").write(text)
+        src_srt = ascii_out + ".srt"
+        if os.path.exists(src_srt):
+            open(outbase + ".srt", "w", encoding="utf-8").write(
+                tidy(open(src_srt, encoding="utf-8").read()))
+        return text
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------- 翻译 ----------
@@ -142,6 +159,39 @@ def translate(text, log):
 
 
 # ---------- 总结 ----------
+def _ollama_up(url):
+    try:
+        urllib.request.urlopen(url.rstrip("/") + "/api/tags", timeout=3).read()
+        return True
+    except Exception:
+        return False
+
+
+def ensure_ollama(url, log):
+    if _ollama_up(url):
+        return True
+    exe = shutil.which("ollama") or os.path.expandvars(
+        r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+    if not exe or not os.path.exists(exe):
+        return False
+    log(" Ollama 没在跑，拉起来…")
+    flags = 0
+    if hasattr(subprocess, "DETACHED_PROCESS"):
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen([exe, "serve"], creationflags=flags,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log(" 拉不起来：" + str(e)[:80])
+        return False
+    for _ in range(20):
+        time.sleep(3)
+        if _ollama_up(url):
+            log(" Ollama 已就绪")
+            return True
+    return False
+
+
 def summarize(text, cfg, log):
     s = cfg.get("summary", {})
     prov = (s.get("provider") or "none").lower()
@@ -152,10 +202,20 @@ def summarize(text, cfg, log):
               f"重要术语（保留原文用词）、行动项（如果有）。不要复述原文，不要编造。\n\n{text}")
     log(f"  总结（{prov}）…")
     if prov == "ollama":
+        ensure_ollama(s.get("url") or "http://127.0.0.1:11434", log)
+        opts = {}
+        if s.get("num_ctx"):
+            opts["num_ctx"] = int(s["num_ctx"])
         body = {"model": s.get("model") or "qwen3:14b", "stream": False,
                 "messages": [{"role": "user", "content": prompt}]}
-        return _post(s.get("url") or "http://127.0.0.1:11434/api/chat", body, {}, 1800)[
-            "message"]["content"].strip()
+        if opts:
+            body["options"] = opts
+        if "think" in s:
+            body["think"] = bool(s["think"])
+        base = (s.get("url") or "http://127.0.0.1:11434").rstrip("/")
+        if not base.endswith("/api/chat"):
+            base += "/api/chat"
+        return _post(base, body, {}, 1800)["message"]["content"].strip()
     if prov == "gemini":
         url = ("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
                % (s.get("model") or "gemini-2.5-flash", s.get("key", "")))
@@ -172,13 +232,21 @@ def summarize(text, cfg, log):
 
 
 def _post(url, payload, headers, timeout):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json", **headers})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError("接口 %s：%s" % (e.code, e.read().decode("utf-8", "ignore")[:200]))
+    """带一次重试：Ollama 刚被拉起来时偶尔会立刻断开（WinError 10054）。"""
+    last = None
+    for attempt in range(3):
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json", **headers})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise RuntimeError("接口 %s：%s" % (e.code, e.read().decode("utf-8", "ignore")[:200]))
+        except Exception as e:
+            last = e
+            if attempt < 2:
+                time.sleep(4)
+    raise RuntimeError("连接失败：" + str(last))
 
 
 # ---------- 单个任务 ----------
@@ -193,7 +261,7 @@ def process_job(jobdir, cfg, log):
     json.dump(status, open(os.path.join(outdir, "status.json"), "w", encoding="utf-8"), ensure_ascii=False)
 
     tmp = tempfile.mkdtemp(prefix="rx.")
-    done_files, err = [], None
+    done_files, err, warn = [], None, []
     try:
         for f in job.get("files", []):
             src = os.path.join(jobdir, f["name"])
@@ -209,10 +277,14 @@ def process_job(jobdir, cfg, log):
                 open(os.path.join(outdir, base + ".translation.txt"), "w", encoding="utf-8").write(tr)
                 item["translation"] = base + ".translation.txt"
             if "summary" in ops and text.strip():
-                sm = summarize(text, cfg, log)
-                if sm:
-                    open(os.path.join(outdir, base + ".summary.md"), "w", encoding="utf-8").write(sm)
-                    item["summary"] = base + ".summary.md"
+                try:
+                    sm = summarize(text, cfg, log)
+                    if sm:
+                        open(os.path.join(outdir, base + ".summary.md"), "w", encoding="utf-8").write(sm)
+                        item["summary"] = base + ".summary.md"
+                except Exception as e:
+                    warn.append("总结失败：" + str(e)[:120])
+                    log(" 总结失败，其余照常：" + str(e)[:80])
             done_files.append(item)
         state = "done"
     except Exception as e:
@@ -223,6 +295,8 @@ def process_job(jobdir, cfg, log):
 
     status = {"id": jid, "state": state, "files": done_files,
               "finished": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if warn:
+        status["warning"] = "；".join(warn)
     if err:
         status["error"] = err
     json.dump(status, open(os.path.join(outdir, "status.json"), "w", encoding="utf-8"),
@@ -243,12 +317,21 @@ def scan(cfg, log):
         jobdir = os.path.join(inbox, name)
         jf = os.path.join(jobdir, "job.json")
         if not os.path.isfile(jf):
+            # 文件夹已同步、job.json 还没下来：算作待办，别让这次触发白跑
+            try:
+                if time.time() - os.path.getmtime(jobdir) < 600:
+                    left += 1
+            except OSError:
+                pass
             continue
         try:
-            job = json.load(open(jf, encoding="utf-8"))
+            job = json.load(open(jf, encoding="utf-8-sig"))
         except Exception:
+            # 常见于 OneDrive 还没把这个文件同步到本地（云占位文件读不了）
+            if time.time() - os.path.getmtime(jf) < 600:
+                left += 1
             continue
-        if job.get("state") not in ("queued", "failed"):
+        if job.get("state") != "queued":
             continue
         left += 1
         # 等 OneDrive 同步落盘：job 至少要 5 秒前，且文件大小跟 job.json 里记的一致
@@ -290,6 +373,11 @@ def main():
             continue
         left = scan(cfg, log)
         if a.once:
+            # 被 SSH 叫一次就守到最后：OneDrive 还没同步完的会一直等
+            deadline = time.time() + 2700
+            while left > 0 and time.time() < deadline:
+                time.sleep(5)
+                left = scan(cfg, log)
             return 0
         wait = 4 if left else a.interval
         time.sleep(wait)

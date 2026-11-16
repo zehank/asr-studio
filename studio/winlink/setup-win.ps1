@@ -211,8 +211,19 @@ if ($WithOllama) {
   }
 }
 
-# ---------- 7. SSH（Mac 靠它触发，不再需要自启的接收端） ----------
+# ---------- 7. SSH + 交互式工作任务 ----------
+# OneDrive 的「按需下载」文件只有用户会话能读；SSH 落在 session 0，读不动云文件。
+# 所以：SSH 只负责 /run 一个交互式计划任务，真正的处理在用户会话里跑。
 $PubKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDeV6+tthAqKMG9KDKScFCOwEw8AMdiGD38beYum8xq zehan@mac'
+if (-not $DryRun) {
+  $pyw = Join-Path $pyDir "python.exe"
+  $argText = "`"$dstRecv`" --config `"$cfgPath`" --once"
+  $action = New-ScheduledTaskAction -Execute $pyw -Argument $argText -WorkingDirectory $DataDir
+  $principal = New-ScheduledTaskPrincipal -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName "ASRWorker" -Action $action -Principal $principal -Force | Out-Null
+  Say "已注册交互式任务 ASRWorker（没有触发器，只在 Mac 叫它时跑）"
+}
+
 if ($EnableSsh) {
   if ($DryRun) {
     Say "会安装并启用 OpenSSH Server，并把 Mac 的公钥加进 administrators_authorized_keys"
@@ -231,15 +242,8 @@ if ($EnableSsh) {
     }
     icacls $f /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
     Say "sshd 已启动并设为自动；Mac 的公钥已加入"
-    Say "自检：ssh -T $env:USERNAME@$(hostname) 从 Mac 试一下"
   }
-} else {
-  Say "没加 -EnableSsh，所以没动 SSH。Mac 要触发转写必须能 ssh 进来。"
 }
-
-# 小结：接收端不再常驻，由 Mac 用 SSH 触发
-Say "接收端不是常驻服务；Mac 投放后执行："
-Say "  python.exe $dstRecv --config $cfgPath --once"
 
 # ---------- 8. 自查 ----------
 Say ""

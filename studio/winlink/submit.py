@@ -10,9 +10,7 @@ DEFAULT_ROOT = os.path.expanduser("~/Library/CloudStorage/OneDrive-UniversityofW
 OPS = ("transcribe", "translate", "summary")
 # 触发通道：文件走 OneDrive，信号走 SSH（Tailscale 内网地址）
 SSH_HOST = os.environ.get("ASR_WIN_HOST", "rzhank@100.77.101.77")
-SSH_TARGET = os.environ.get(
-    "ASR_WIN_CMD",
-    r'cmd /c start "asr" /min C:\ASR\python\python.exe C:\ASR\receiver.py --config C:\ASR\config.json --once')
+SSH_TARGET = os.environ.get("ASR_WIN_CMD", "schtasks /run /tn ASRWorker")
 
 
 def main():
@@ -60,7 +58,8 @@ def main():
     with open(os.path.join(jobdir, "job.json"), "w", encoding="utf-8") as fp:
         json.dump(job, fp, ensure_ascii=False, indent=2)
 
-    # 立刻叫 Windows 干活（SSH）；失败也不影响，任务已排进 inbox，手动跑一次就行
+    # 立刻叫 Windows 干活：ssh 触发一个交互式计划任务
+    # （OneDrive 的云占位文件在 SSH 的 session 0 里读不了，必须在用户会话里跑）
     ok, detail = trigger_remote()
     print(jobdir)
     print("trigger:", "ok" if ok else "failed — " + detail)
