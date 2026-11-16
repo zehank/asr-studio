@@ -373,7 +373,14 @@ def main():
             continue
         left = scan(cfg, log)
         if a.once:
-            # 被 SSH 叫一次就守到最后：OneDrive 还没同步完的会一直等
+            # 被 SSH 叫一次就守到最后：任务可能还没同步过来，先等 2 分钟再下结论
+            if left == 0 and not locals().get("_waited"):
+                _waited = True
+                for _ in range(12):
+                    time.sleep(10)
+                    left = scan(cfg, log)
+                    if left:
+                        break
             deadline = time.time() + 2700
             while left > 0 and time.time() < deadline:
                 time.sleep(5)

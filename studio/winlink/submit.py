@@ -58,6 +58,13 @@ def main():
     with open(os.path.join(jobdir, "job.json"), "w", encoding="utf-8") as fp:
         json.dump(job, fp, ensure_ascii=False, indent=2)
 
+    # OneDrive 同步有延迟，第一次触发可能早于文件夹到位：90 秒后再补一枪
+    import threading
+    def _later():
+        time.sleep(90)
+        trigger_remote()
+    threading.Thread(target=_later, daemon=True).start()
+
     # 立刻叫 Windows 干活：ssh 触发一个交互式计划任务
     # （OneDrive 的云占位文件在 SSH 的 session 0 里读不了，必须在用户会话里跑）
     ok, detail = trigger_remote()
